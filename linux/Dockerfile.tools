@@ -1,0 +1,115 @@
+# syntax=docker/dockerfile:1
+# Static comskip and whisper-cli for Linux (x86-64 and ARM64), the same
+# binaries GiVo Server ships in its Linux downloads and its Docker image.
+#
+#   docker buildx build --platform linux/amd64 -f linux/Dockerfile.tools \
+#     --target tools-export --output type=local,dest=out-amd64 .
+#   (and --platform linux/arm64 for ARM64; buildx emulates the other arch)
+#
+# Results are fully static ELF programs: comskip (GPL-2.0, Comskip 0.83.001 at
+# commit a140b6a with FFmpeg 7.1.1 decode-only and argtable 2.13) and
+# whisper-cli (MIT, whisper.cpp v1.9.1), plus whisper.cpp's LICENSE.
+#
+# The stages below are the ones in GiVo Server's own Dockerfile, instruction
+# for instruction.
+
+FROM debian:bookworm@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8 AS tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates curl xz-utils \
+      autoconf automake libtool pkg-config autotools-dev \
+      zlib1g-dev nasm \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG COMSKIP_COMMIT=a140b6ac8bc8f596729e9052819affc779c3b377
+ARG FFMPEG_VER=7.1.1
+ARG FFMPEG_SHA256=733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1
+ARG ARGTABLE_SHA256=8f77e8a7ced5301af6e22f47302fdbc3b1ff41f2b83c43c77ae5ca041771ddbf
+ARG WHISPER_CPP_TAG=v1.9.1
+ARG WHISPER_CPP_COMMIT=f049fff95a089aa9969deb009cdd4892b3e74916
+
+WORKDIR /build
+
+# ---- minimal static ffmpeg (decode-only, no external libs) ----
+RUN set -eux; \
+    curl -fL --retry 3 -o ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VER}.tar.xz"; \
+    echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c -; \
+    tar xJf ffmpeg.tar.xz; \
+    cd "ffmpeg-${FFMPEG_VER}"; \
+    ./configure --prefix=/build/deps \
+      --enable-static --disable-shared \
+      --disable-programs --disable-doc \
+      --disable-avdevice --disable-avfilter --disable-postproc \
+      --disable-network \
+      --disable-encoders --disable-muxers --disable-bsfs \
+      --disable-devices --disable-filters \
+      --disable-protocols --enable-protocol=file,pipe \
+      --disable-autodetect \
+      --enable-zlib; \
+    make -j"$(nproc)"; \
+    make install
+
+# ---- static argtable2 (comskip build dep) ----
+RUN set -eux; \
+    curl -fL --retry 3 -o argtable2.tar.gz \
+      "https://downloads.sourceforge.net/project/argtable/argtable/argtable-2.13/argtable2-13.tar.gz"; \
+    echo "${ARGTABLE_SHA256}  argtable2.tar.gz" | sha256sum -c -; \
+    tar xzf argtable2.tar.gz; \
+    cd argtable2-13; \
+    # 2011-era config.guess/config.sub predate aarch64-linux; refresh them.
+    cp /usr/share/misc/config.guess /usr/share/misc/config.sub .; \
+    ./configure --prefix=/build/deps --enable-static --disable-shared \
+      CFLAGS="-O2 -include ctype.h"; \
+    make -C src -j"$(nproc)"; \
+    make -C src install; \
+    mkdir -p /build/deps/lib/pkgconfig; \
+    cp argtable2.pc /build/deps/lib/pkgconfig/argtable2.pc
+
+# ---- comskip (pinned, static) ----
+RUN set -eux; \
+    git clone https://github.com/erikkaashoek/Comskip.git; \
+    git -C Comskip checkout --quiet "${COMSKIP_COMMIT}"; \
+    cd Comskip; \
+    autoreconf -fiv; \
+    PKG_CONFIG="pkg-config --static" \
+    PKG_CONFIG_LIBDIR=/build/deps/lib/pkgconfig \
+    ./configure --enable-static --disable-gui \
+      CFLAGS="-O2" LDFLAGS="-static" LIBS="-lm -lz -lpthread"; \
+    make -j"$(nproc)"; \
+    strip -s comskip; \
+    mkdir -p /out; \
+    cp comskip /out/comskip; \
+    /out/comskip -h 2>&1 | head -3 || true
+
+# ---- whisper-cli (whisper.cpp, pinned, static, CPU-only) ----
+# GGML_NATIVE=OFF + all x86 ISA extensions OFF = a portable baseline binary
+# that runs on any x86-64/arm64 box, including AVX-less NAS Celerons. Slower
+# than a native-tuned build — correctness over speed for v1 (documented).
+RUN set -eux; \
+    git clone --depth 1 --branch "${WHISPER_CPP_TAG}" \
+      https://github.com/ggerganov/whisper.cpp.git; \
+    test "$(git -C whisper.cpp rev-parse HEAD)" = "${WHISPER_CPP_COMMIT}"; \
+    cmake -S whisper.cpp -B whisper.cpp/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_NATIVE=OFF \
+      -DGGML_OPENMP=OFF \
+      -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF \
+      -DGGML_F16C=OFF -DGGML_AVX512=OFF \
+      -DWHISPER_BUILD_TESTS=OFF \
+      -DWHISPER_BUILD_EXAMPLES=ON \
+      -DCMAKE_EXE_LINKER_FLAGS="-static"; \
+    cmake --build whisper.cpp/build --config Release -j"$(nproc)" --target whisper-cli; \
+    strip -s whisper.cpp/build/bin/whisper-cli; \
+    cp whisper.cpp/build/bin/whisper-cli /out/whisper-cli; \
+    cp whisper.cpp/LICENSE /out/LICENSE-whisper; \
+    /out/whisper-cli --help 2>&1 | head -3 || true
+
+# the GNU C Library inside the static comskip and
+# whisper-cli is the libc6-dev that apt installed above, from the Debian archive
+# of the build day. Its exact version is exported with them: the glibc license
+# notice that ships with them is written from this file (third_party/licenses/
+# gen-licenses.sh, which stops without it).
+RUN dpkg-query -W -f='${Package}\t${Version}\n' libc6 libc6-dev > /out/glibc-dpkg.txt && cat /out/glibc-dpkg.txt
+
+FROM scratch AS tools-export
+COPY --from=tools /out/ /

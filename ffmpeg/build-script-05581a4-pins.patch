@@ -1,0 +1,36 @@
+The one patch build-ffmpeg-macos.sh applies to Martin Riedl's build script at commit
+05581a45b70c22f8b03a3ce51c577fb6ccc64d56 (x264 at commit 0480cb05 instead of master; rav1e's
+crates exactly as locked).
+
+diff --git a/script/build-rav1e.sh b/script/build-rav1e.sh
+index 6b8137c..21c9cac 100755
+--- a/script/build-rav1e.sh
++++ b/script/build-rav1e.sh
+@@ -48,5 +48,5 @@ cd "rav1e-$VERSION/"
+ checkStatus $? "change directory failed"
+ 
+ # install
+-cargo cinstall --library-type staticlib --release -j $CPUS --prefix "$TOOL_DIR" --libdir="$TOOL_DIR/lib"
++cargo cinstall --locked --library-type staticlib --release -j $CPUS --prefix "$TOOL_DIR" --libdir="$TOOL_DIR/lib"
+ checkStatus $? "build or installation failed"
+diff --git a/script/build-x264.sh b/script/build-x264.sh
+index fc94a42..b379ea3 100755
+--- a/script/build-x264.sh
++++ b/script/build-x264.sh
+@@ -33,13 +33,13 @@ cd "x264/"
+ checkStatus $? "change directory failed"
+ 
+ # download source
+-download https://code.videolan.org/videolan/x264/-/archive/master/x264-master.tar.gz "x264-master.tar.gz"
++download https://code.videolan.org/videolan/x264/-/archive/0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee/x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.gz "x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.gz"
+ checkStatus $? "download failed"
+ 
+ # unpack
+-tar -zxf "x264-master.tar.gz"
++tar -zxf "x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.gz"
+ checkStatus $? "unpack failed"
+-cd "x264-master/"
++cd "x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee/"
+ checkStatus $? "change directory failed"
+ 
+ # prepare build
